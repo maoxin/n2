@@ -1,0 +1,4 @@
+.ipynb_checkpoints/
+*.csv
+*.gpickle
+data/gdelt2HeaderRows
