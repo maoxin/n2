@@ -119,8 +119,6 @@ class MongoClient:
     
     def get_news_to_storyfy(self, *args, **kwargs):
         return self.collection.find({"storified": False, "embedded": True}, *args, **kwargs)
-        # return self.collection.find({"embedded": True, "date_added": {"$gte": to_date("20220725"), "$lt": to_date("20220728")}}, *args, **kwargs)
-        # return self.collection.find({"embedded": True}, *args, **kwargs)
 
 
 class GDELTDataset:
@@ -168,6 +166,7 @@ class GDELTDataset:
         
         self.csv_paths = np.array(sorted(self.csv_paths, key=lambda path: to_date(path.name.split(".")[0])))
         self.dates = np.array([to_date(path.name.split(".")[0]) for path in self.csv_paths])
+
 
 class StoryDataset:
     def __init__(self, DG_path="/Volumes/Extreme SSD/story_graph.gpickle"):
