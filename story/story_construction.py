@@ -12,14 +12,14 @@ import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
 
-from data.database import MilvusClient, MongoClient
-from data.utils import get_date_nday_before, to_date
+from data.database import MilvusClient, MongoClient, StoryDataset
+from data.utils import get_date_nday_before
 
 
-def get_links_to_event(global_event_id, database_client, r_thresh=0.8, p_thresh=0.05):
+def get_links_to_event(global_event_id, milvus_client: MilvusClient, mongo_client: MongoClient, r_thresh=0.8, p_thresh=0.05):
     if global_event_id is None:
         return []
-    query_event, events_candidate = get_candidate_events(database_client, global_event_id)
+    query_event, events_candidate = get_candidate_events(milvus_client, mongo_client, global_event_id)
     if query_event is None:
         return []
     links = link_predict(query_event, events_candidate, r_thresh, p_thresh)
@@ -33,12 +33,27 @@ def get_candidate_events(milvus_client: MilvusClient, mongo_client: MongoClient,
         return None, []
     
     query_event = query_event[0]
-    date_added = to_date(query_event['date_added'])
-    expr_mongo = {"date_added": {"$gt": get_date_nday_before(date_added, n=3), "$lte": get_date_nday_before(date_added, hours=1)}}
-    events_candidate = mongo_client.find(expr_mongo)
-    ids_candidates = [event['global_event_id'] for event in events_candidate]
-    events_candidate = database_client.query(expr=f"global_event_id in {ids_candidates}",
-                                             output_fields=["global_event_id", "embeddings"], consistency_level="Strong")
+    date_added = query_event['date_added']
+    events_candidate = mongo_client.find({
+        "date_added": {"$gt": get_date_nday_before(date_added, days=3),
+                       "$lte": get_date_nday_before(date_added, hours=1)},
+        "embedded": True}, 
+        projection=["global_event_id"]
+    )
+    ids_candidate = [event['global_event_id'] for event in events_candidate]
+    
+    search_params = {"metric_type": "IP", "params": {"nprobe": 10}}
+    hit = milvus_client.search(
+        data=[query_event["embeddings"]],
+        anns_field="embeddings", 
+        param=search_params, 
+        limit=10, 
+        expr=f"global_event_id in {ids_candidate}",
+        consistency_level="Strong")[0]
+    ids_candidate = [id for id in hit.ids]
+
+    events_candidate = milvus_client.query(expr=f"global_event_id in {ids_candidate}",
+                                           output_fields=["global_event_id", "embeddings"], consistency_level="Strong")
     events_candidate = [event for event in events_candidate if tuple(event["embeddings"]) != tuple(query_event["embeddings"])]
 
     return query_event, events_candidate
@@ -67,7 +82,7 @@ def link_predict(query_event, events_candidate, r_thresh=0.8, p_thresh=0.05):
     from_ids = [event_id for event_id in model.pvalues.index if event_id != "Intercept" and model.pvalues[event_id] < p_thresh]
     weights = 1 - model.pvalues[from_ids]
     from_ids = [dewrap_event_id(event_id) for event_id in from_ids]
-    links = [(from_id, to_id, {"weight": weight}) for from_id, weight in zip(from_ids, weights)]
+    links = [(from_id, to_id, {"weight": weight, "r_thresh": r_thresh, "p_thresh": p_thresh}) for from_id, weight in zip(from_ids, weights)]
     return links
 
 
@@ -87,25 +102,33 @@ def dewrap_event_id(wrapped_event_id):
 
 
 class StoryConstructor:
-    def __init__(self, database_client=None):
-        self.database_client = database_client
+    def __init__(self, milvus_client: MilvusClient = None, mongo_client: MongoClient = None, story_dataset: StoryDataset = None):
+        self.milvus_client = milvus_client
+        self.mongo_client = mongo_client
+        self.story_dataset = story_dataset
 
     def construct_by_tranverse(self, r_thresh=0.8, p_thresh=0.05, multi_process=False):
         DG = nx.DiGraph()
-        events = self.database_client.query(expr="global_event_id >= 0", output_fields=["global_event_id"], consistency_level="Strong")
+        events = self.mongo_client.get_news_to_storyfy(projection=["global_event_id"])
         global_event_ids = [event['global_event_id'] for event in events]
         
-        get_links_to_event_ = partial(get_links_to_event, database_client=self.database_client, r_thresh=r_thresh, p_thresh=p_thresh)
+        get_links_to_event_ = partial(get_links_to_event, milvus_client=self.milvus_client, mongo_client=self.mongo_client, r_thresh=r_thresh, p_thresh=p_thresh)
         if multi_process:
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                for links in tqdm(executor.map(get_links_to_event_, global_event_ids), total=len(global_event_ids)):
+                for global_event_id, links in tqdm(zip(global_event_ids, executor.map(get_links_to_event_, global_event_ids)), total=len(global_event_ids)):
                     if links:
                         DG.add_edges_from(links)
+                    self.mongo_client.record_storified(global_event_id)
         else:
             for global_event_id in tqdm(global_event_ids):
                 links = get_links_to_event_(global_event_id)
                 if links:
                     DG.add_edges_from(links)
+                self.mongo_client.record_storified(global_event_id)
+
+        if self.story_dataset is not None:
+            self.story_dataset.update(DG)
+        
         return DG
     
     def hyperparameter_test(self):
@@ -120,23 +143,18 @@ class StoryConstructor:
             ccs_stats.loc["p_thresh"] = p_thresh
             all_stats.append(ccs_stats)
         df_stats = pd.DataFrame(all_stats)
-        df_stats.to_csv("hyperparameter_test.csv")
+        df_stats.to_csv("hyperparameter_test_new.csv")
 
 
 if __name__ == "__main__":
     r_thresh = 0.8
-    p_thresh = 0.05 
+    p_thresh = 0.05
 
-    database_client = MilvusClient()
-    story_constructor = StoryConstructor(database_client)
+    milvus_client = MilvusClient()
+    mongo_client = MongoClient()
+    story_dataset = StoryDataset()
+    story_constructor = StoryConstructor(milvus_client=milvus_client, mongo_client=mongo_client, story_dataset=story_dataset)
     DG = story_constructor.construct_by_tranverse(r_thresh=r_thresh, p_thresh=p_thresh, multi_process=True)
-    nx.write_gpickle(DG, f"test_1hour_July_r{r_thresh}_p_{p_thresh}.gpickle")
 
-    G = DG.to_undirected()
-    print(f"r_thresh = {r_thresh}, p_thresh = {p_thresh}")
-    print(f"# of connected components: {nx.number_connected_components(G)}")
-    ccs_s = pd.Series([len(cc) for cc in nx.connected_components(G)])
-    print("componet size:")
-    print(ccs_s.describe())
     # story_constructor.hyperparameter_test()
     

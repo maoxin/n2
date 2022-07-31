@@ -3,6 +3,8 @@ if __name__ == "__main__":
     import sys
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from math import ceil
+
 from newspaper import Article
 import concurrent.futures
 
@@ -27,6 +29,12 @@ def download_news(url):
             return None, None
 
 
+def batch(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
+
+
 class NewsRetriever:
     def __init__(self, config, embedder: NewsEmbedder = None, milvus_client: MilvusClient = None, mongo_client: MongoClient = None):
         self.config = config
@@ -40,10 +48,10 @@ class NewsRetriever:
 
     def filter_event_undownloaded(self, event_meta_df):
         ids = event_meta_df.GLOBALEVENTID.to_numpy()
-        is_in = np.array([self.mongo_client.find_one({"global_event_id": int(id)}) is not None for id in ids])
+        is_in = np.array([self.mongo_client.find_one({"global_event_id": int(id)}, projection=["global_event_id"]) is not None for id in ids])
         return event_meta_df[~is_in]
 
-    def retrieve(self, event_meta_df, filter_by_source=True, filter_by_downloaded=True):
+    def retrieve(self, event_meta_df, filter_by_source=True, filter_by_downloaded=True, embed_batch_size=1):
         if filter_by_source:
             event_meta_df = self.filter_event_from_important_sources(event_meta_df)
         if filter_by_downloaded:
@@ -57,13 +65,16 @@ class NewsRetriever:
                     self.mongo_client.insert(global_event_id, date_added, title, text, url)
 
         unembedded_news = list(self.mongo_client.get_news_to_embed())
-        for news in tqdm(unembedded_news, desc="Embedding news"):
-            global_event_id, title, text, date_added = news['global_event_id'], news['title'], news['text'], news['date_added']
-            date_added = int(to_datestr(date_added))
-            embedding = self.embedder.embedding_from_title_text(title, text)
+        for news_batch in tqdm(batch(unembedded_news, embed_batch_size), total=ceil(len(unembedded_news) / embed_batch_size), desc="Embedding news"):
+            global_event_ids = [news["global_event_id"] for news in news_batch]
+            titles = [news["title"] for news in news_batch]
+            texts = [news["text"] for news in news_batch]
+            dates_added = [int(to_datestr(news["date_added"])) for news in news_batch]
+            embedding = self.embedder.embedding_from_title_text(titles, texts)
             if embedding is not None:
-                self.milvus_client.insert(global_event_id, embedding, date_added)
-            self.mongo_client.record_embedded(global_event_id)
+                insert_results = self.milvus_client.insert(global_event_ids, embedding, dates_added)
+                for global_event_id in insert_results.primary_keys:
+                    self.mongo_client.record_embedded(global_event_id)
 
 
 
@@ -89,6 +100,6 @@ if __name__ == "__main__":
     news_retriever = NewsRetriever(config, embedder, milvus_client, mongo_client)
 
     gdelt_dataset = GDELTDataset(args.gdelt_dir)
-    # gdelt_dataset.update_database()
+    gdelt_dataset.update_database()
     for event_meta_df in tqdm(gdelt_dataset, desc="Retrieving news"):
         _ = news_retriever.retrieve(event_meta_df)

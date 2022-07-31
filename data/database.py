@@ -4,6 +4,7 @@ if __name__ == "__main__":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from datetime import datetime
+from functools import reduce
 
 from pymilvus import (
     connections,
@@ -14,6 +15,7 @@ from pymilvus import (
     Collection,
 )
 from tqdm import tqdm
+import networkx as nx
 import numpy as np
 import pandas as pd
 import pymongo
@@ -57,12 +59,7 @@ class MilvusClient:
         )
     
     def insert(self, global_event_id, embedding, date_added):
-        if isinstance(embedding, torch.Tensor):
-            embedding = embedding.detach().cpu().numpy()
-        embedding = embedding.flatten()
-        insert_result = self.collection.insert([
-            [global_event_id], [embedding], [date_added]
-        ])
+        insert_result = self.collection.insert([global_event_id, embedding, date_added])
         return insert_result
 
     def query(self, *args, **kwargs):
@@ -117,11 +114,13 @@ class MongoClient:
             {"$set": {"storified": True}}
         )
 
-    def get_news_to_embed(self):
-        return self.collection.find({"embedded": False})
+    def get_news_to_embed(self, *args, **kwargs):
+        return self.collection.find({"embedded": False}, *args, **kwargs)
     
-    def get_news_to_storyfy(self):
-        return self.collection.find({"storified": False, "embedded": True})
+    def get_news_to_storyfy(self, *args, **kwargs):
+        return self.collection.find({"storified": False, "embedded": True}, *args, **kwargs)
+        # return self.collection.find({"embedded": True, "date_added": {"$gte": to_date("20220725"), "$lt": to_date("20220728")}}, *args, **kwargs)
+        # return self.collection.find({"embedded": True}, *args, **kwargs)
 
 
 class GDELTDataset:
@@ -169,3 +168,71 @@ class GDELTDataset:
         
         self.csv_paths = np.array(sorted(self.csv_paths, key=lambda path: to_date(path.name.split(".")[0])))
         self.dates = np.array([to_date(path.name.split(".")[0]) for path in self.csv_paths])
+
+class StoryDataset:
+    def __init__(self, DG_path="/Volumes/Extreme SSD/story_graph.gpickle"):
+        self.DG_path = Path(DG_path)
+        self.DG = None
+    
+    def update(self, new_DG):
+        if self.DG is None:
+            self.load()
+        self.DG = nx.compose(self.DG, new_DG)
+        nx.write_gpickle(self.DG, str(self.DG_path))
+    
+    def load(self):
+        if self.DG_path.exists():
+            self.DG = nx.read_gpickle(str(self.DG_path))
+        else:
+            self.DG = nx.DiGraph()
+
+    def describe(self):
+        if self.DG is None:
+            self.load()
+        G = self.DG.to_undirected()
+        print(f"# of connected components: {nx.number_connected_components(G)}")
+        ccs_s = pd.Series([len(cc) for cc in nx.connected_components(G)])
+        print("componet size:")
+        print(ccs_s.describe())
+        
+    def get_family_tree_graph(self, nodes, mode="single_tree", cluster_iou_threshold=0.6):
+        if self.DG is None:
+            self.load()
+        nodes = [node for node in nodes if self.DG.has_node(node)]
+        ancestors_nodes = [nx.ancestors(self.DG, node) for node in nodes]
+        
+        if mode == "single_tree":
+            ancestors = reduce(set.union, ancestors_nodes)
+            return nx.subgraph(self.DG, ancestors | set(nodes))
+        elif mode == "tree_clusters":
+            sub_graphs = [nx.subgraph(self.DG, ancestors | {node}) for node, ancestors in zip(nodes, ancestors_nodes)]
+            return self.merge_sub_graphs(sub_graphs, cluster_iou_threshold)
+        else:
+            raise NotImplementedError
+    
+    def merge_sub_graphs(self, sub_graphs, iou_threshold=0.6):
+        if self.DG is None:
+            self.load()
+            
+        nodes_subgraphs = [set(sub_graph.nodes()) for sub_graph in sub_graphs]
+
+        G_subgraph_link = nx.Graph()
+        for i, nodes_i in enumerate(nodes_subgraphs[:-1]):
+            for j, nodes_j in enumerate(nodes_subgraphs[i:]):
+                intersection = len(nodes_i & nodes_j)
+                union = len(nodes_i | nodes_j)
+                if union == 0:
+                    continue
+                j = i + j
+                if intersection / union > iou_threshold:
+                    G_subgraph_link.add_edge(i, j)
+
+        merged_sub_graphs = []
+        for cc in nx.connected_components(G_subgraph_link):
+            nodes_merged_sub_graph = reduce(set.union, [nodes_subgraphs[i] for i in cc])
+            merged_sub_graphs.append(self.DG.subgraph(nodes_merged_sub_graph))
+        
+        print(f"# of merged subgraphs: {len(merged_sub_graphs)}")
+        merged_sub_graphs = sorted(merged_sub_graphs, key=lambda sub_graph: len(sub_graph.nodes()), reverse=True)
+            
+        return merged_sub_graphs
