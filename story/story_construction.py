@@ -147,13 +147,23 @@ class StoryConstructor:
 
 
 if __name__ == "__main__":
-    r_thresh = 0.8
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    parser.add_argument("--restorify", action="store_true")
+    args = parser.parse_args()
+    
+    r_thresh = 0.7
     p_thresh = 0.05
 
     milvus_client = MilvusClient()
     mongo_client = MongoClient()
     story_dataset = StoryDataset()
     story_constructor = StoryConstructor(milvus_client=milvus_client, mongo_client=mongo_client, story_dataset=story_dataset)
+    
+    if args.restorify:
+        mongo_client.reset_storification()
+        story_dataset.reset()
+    
     DG = story_constructor.construct_by_tranverse(r_thresh=r_thresh, p_thresh=p_thresh, multi_process=True)
 
     # story_constructor.hyperparameter_test()

@@ -5,6 +5,7 @@ if __name__ == "__main__":
 
 from datetime import datetime
 from functools import reduce
+import shutil
 
 from pymilvus import (
     connections,
@@ -21,7 +22,7 @@ import pandas as pd
 import pymongo
 import torch
 
-from data.utils import to_date, get_date_range
+from data.utils import to_date, get_date_range, to_datestr
 from data import gdelt_download
 
 
@@ -85,14 +86,14 @@ class MongoClient:
         self.collection.create_index([('global_event_id', pymongo.ASCENDING)], unique=True)
         self.collection.create_index("date_added")
     
-    def insert(self, global_event_id, date_added, title, text, url):
+    def insert(self, global_event_id, date_added, title, text, url, embedded=False):
         self.collection.insert_one({
             "global_event_id": int(global_event_id),
             "date_added": to_date(date_added),
             "title": title,
             "text": text,
             "url": url,
-            "embedded": False,
+            "embedded": embedded,
             "storified": False,
         })
 
@@ -119,6 +120,10 @@ class MongoClient:
     
     def get_news_to_storyfy(self, *args, **kwargs):
         return self.collection.find({"storified": False, "embedded": True}, *args, **kwargs)
+        # return self.collection.find({"embedded": True}, *args, **kwargs)
+    
+    def reset_storification(self):
+        self.collection.update_many({}, {"$set": {"storified": False}})
 
 
 class GDELTDataset:
@@ -178,6 +183,10 @@ class StoryDataset:
             self.load()
         self.DG = nx.compose(self.DG, new_DG)
         nx.write_gpickle(self.DG, str(self.DG_path))
+        
+    def reset(self):
+        if self.DG_path.exists():
+            shutil.move(str(self.DG_path), str(self.DG_path.parent/f"{self.DG_path.name}.{to_datestr(datetime.now())}"))
     
     def load(self):
         if self.DG_path.exists():
@@ -235,3 +244,12 @@ class StoryDataset:
         merged_sub_graphs = sorted(merged_sub_graphs, key=lambda sub_graph: len(sub_graph.nodes()), reverse=True)
             
         return merged_sub_graphs
+    
+    @staticmethod
+    def split_ancestors_descendants(family_tree_graph, nodes):
+        family_tree_graph = set(family_tree_graph.nodes())
+        nodes = set(nodes)
+        descendants = family_tree_graph & nodes
+        ancestors = family_tree_graph - descendants
+        
+        return ancestors, descendants

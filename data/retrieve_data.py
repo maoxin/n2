@@ -62,10 +62,15 @@ class NewsRetriever:
             for global_event_id, date_added, url, (title, text) in tqdm(zip(ids, dates_added, urls, executor.map(download_news, urls)), total=len(ids),
                                                                         desc="Downloading news"):
                 if title is not None and text is not None:
+                    # query_event = self.milvus_client.query(expr=f"global_event_id == {global_event_id}",
+                                    #   output_fields=["global_event_id"], consistency_level="Strong")
+                    # embedded = (len(query_event) != 0)
+                    # self.mongo_client.insert(global_event_id, date_added, title, text, url, embedded=embedded)
                     self.mongo_client.insert(global_event_id, date_added, title, text, url)
 
         unembedded_news = list(self.mongo_client.get_news_to_embed())
-        for news_batch in tqdm(batch(unembedded_news, embed_batch_size), total=ceil(len(unembedded_news) / embed_batch_size), desc="Embedding news"):
+        for news_batch in tqdm(batch(unembedded_news, embed_batch_size),
+                               total=ceil(len(unembedded_news) / embed_batch_size), desc="Embedding news"):
             global_event_ids = [news["global_event_id"] for news in news_batch]
             titles = [news["title"] for news in news_batch]
             texts = [news["text"] for news in news_batch]
@@ -75,7 +80,6 @@ class NewsRetriever:
                 insert_results = self.milvus_client.insert(global_event_ids, embedding, dates_added)
                 for global_event_id in insert_results.primary_keys:
                     self.mongo_client.record_embedded(global_event_id)
-
 
 
 if __name__ == "__main__":
