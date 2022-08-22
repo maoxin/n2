@@ -168,3 +168,5 @@ if __name__ == "__main__":
 
     # story_constructor.hyperparameter_test()
     
+    milvus_client.release()
+    

@@ -26,7 +26,7 @@ class StoryDashboard:
         self.graph_clusters = None  # graph_clusters[0] is the single tree, graph_clusters[1:] are the clusters
         self.node_text_map = None
         
-    def get_graph(self, expr, cluster_iou_threshold=0.6):
+    def get_graph(self, expr, depth_limit=None, cluster_iou_threshold=0.6):
         expr["storified"] = True
         records = self.mongo_client.find(expr)
         nodes = [r["global_event_id"] for r in records]
@@ -34,7 +34,7 @@ class StoryDashboard:
         self.target_nodes = nodes
         
         graph_single_tree = self.story_dataset.get_family_tree_graph(nodes, mode="single_tree")
-        graph_clusters = self.story_dataset.get_family_tree_graph(nodes, mode="tree_clusters", 
+        graph_clusters = self.story_dataset.get_family_tree_graph(nodes, mode="tree_clusters", depth_limit=depth_limit,
                                                                   cluster_iou_threshold=cluster_iou_threshold)
         graph_clusters = [graph_single_tree] + graph_clusters
         
@@ -66,9 +66,9 @@ class StoryDashboard:
         
         return graph_single_tree, graph_clusters, node_text_map
     
-    def get_graph_today(self, cluster_iou_threshold=0.6):
+    def get_graph_today(self, depth_limit=None, cluster_iou_threshold=0.6):
         expr = {"date_added": {"$gte": datetime.utcnow() - timedelta(days=1)}}
-        return self.get_graph(expr, cluster_iou_threshold=cluster_iou_threshold)
+        return self.get_graph(expr, depth_limit=depth_limit, cluster_iou_threshold=cluster_iou_threshold)
     
     def __len__(self):
         if self.graph_clusters is None:

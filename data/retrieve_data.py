@@ -107,3 +107,5 @@ if __name__ == "__main__":
     gdelt_dataset.update_database()
     for event_meta_df in tqdm(gdelt_dataset, desc="Retrieving news"):
         _ = news_retriever.retrieve(event_meta_df)
+    
+    milvus_client.release()

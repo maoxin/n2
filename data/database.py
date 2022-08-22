@@ -70,6 +70,9 @@ class MilvusClient:
     def search(self, *args, **kwargs):
         self.collection.load()
         return self.collection.search(*args, **kwargs)
+    
+    def release(self):
+        self.collection.release()
 
 
 class MongoClient:
@@ -160,15 +163,10 @@ class GDELTDataset:
             end_date = datetime.utcnow()
             end_date = datetime(year=end_date.year, month=end_date.month, day=end_date.day)
 
-        csv_paths = list(self.csv_paths)
-        dates = list(self.dates)
         for date in tqdm(get_date_range(start_date, end_date), desc="Updating GDELT database"):
             gdelt_download.download_(date, output_dir=self.gdelt_dir)
-            if to_date(date) not in self.dates:
-                csv_paths.append(self.gdelt_dir / f"{date}.csv")
-                dates.append(to_date(date))
         
-        
+        self.csv_paths = [path for path in self.gdelt_dir.glob("*.csv") if not path.name.startswith("._")]
         self.csv_paths = np.array(sorted(self.csv_paths, key=lambda path: to_date(path.name.split(".")[0])))
         self.dates = np.array([to_date(path.name.split(".")[0]) for path in self.csv_paths])
 
@@ -203,11 +201,11 @@ class StoryDataset:
         print("componet size:")
         print(ccs_s.describe())
         
-    def get_family_tree_graph(self, nodes, mode="single_tree", cluster_iou_threshold=0.6):
+    def get_family_tree_graph(self, nodes, mode="single_tree", depth_limit=None, cluster_iou_threshold=0.6):
         if self.DG is None:
             self.load()
         nodes = [node for node in nodes if self.DG.has_node(node)]
-        ancestors_nodes = [nx.ancestors(self.DG, node) for node in nodes]
+        ancestors_nodes = [self.get_ancestors(node, depth_limit) for node in nodes]
         
         if mode == "single_tree":
             ancestors = reduce(set.union, ancestors_nodes)
@@ -244,6 +242,14 @@ class StoryDataset:
         merged_sub_graphs = sorted(merged_sub_graphs, key=lambda sub_graph: len(sub_graph.nodes()), reverse=True)
             
         return merged_sub_graphs
+    
+    def get_ancestors(self, node, depth_limit=None):
+        if self.DG is None:
+            self.load()
+            
+        if depth_limit is None:
+            return nx.ancestors(self.DG, node)
+        return nx.bfs_tree(self.DG, node, depth_limit=depth_limit, reverse=True).nodes()
     
     @staticmethod
     def split_ancestors_descendants(family_tree_graph, nodes):
